@@ -1,0 +1,6 @@
+This Java Native Interface library decodes H264 video using the FFMPEG library.
+
+Compile with 
+
+  <Android NDK path>/ndk-build
+
