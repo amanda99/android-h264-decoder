@@ -1,6 +1,0 @@
-This Java Native Interface library decodes H264 video using the FFMPEG library.
-
-Compile with:
-  <Android NDK path>/ndk-build
-
-H264Decoder is a Java class that calls into the C functions in jni/h264decoder.c
