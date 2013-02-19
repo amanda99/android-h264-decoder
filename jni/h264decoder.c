@@ -1,3 +1,32 @@
+/*
+ *  h264decoder.c
+ *  JNI H.264 video decoder module
+ *
+ *  Copyright (c) 2012, Dropcam
+ *  All rights reserved.
+ *
+ *  Redistribution and use in source and binary forms, with or without
+ *  modification, are permitted provided that the following conditions are met:
+ *
+ *  1. Redistributions of source code must retain the above copyright notice, this
+ *     list of conditions and the following disclaimer.
+ *  2. Redistributions in binary form must reproduce the above copyright notice,
+ *     this list of conditions and the following disclaimer in the documentation
+ *     and/or other materials provided with the distribution.
+ *
+ *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ *  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ *  WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ *  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ *  ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ *  (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ *  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ *  ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ *  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ *  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ */
+
 #include <jni.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +39,7 @@
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
 
+// (Must match defines in H264Decoder.java)
 #define COLOR_FORMAT_YUV420 0
 #define COLOR_FORMAT_RGB565LE 1
 #define COLOR_FORMAT_BGR32 2
@@ -23,11 +53,11 @@
 typedef struct DecoderContext {
   int color_format;
   struct AVCodec *codec;
-  struct AVCodecContext *codecCtx;
-  struct AVFrame *srcFrame;
-  struct AVFrame *dstFrame;
-  struct SwsContext *convertCtx;
-  int frameReady;
+  struct AVCodecContext *codec_ctx;
+  struct AVFrame *src_frame;
+  struct AVFrame *dst_frame;
+  struct SwsContext *convert_ctx;
+  int frame_ready;
 } DecoderContext;
 
 static void set_ctx(JNIEnv *env, jobject thiz, void *ctx) {
@@ -42,8 +72,7 @@ static void *get_ctx(JNIEnv *env, jobject thiz) {
   return (void*)(*env)->GetIntField(env, thiz, fid);
 }
 
-static void av_log_callback(void *ptr, int level, const char *fmt, __va_list vl)
-{
+static void av_log_callback(void *ptr, int level, const char *fmt, __va_list vl) {
   static char line[1024] = {0};
   vsnprintf(line, sizeof(line), fmt, vl);
   D(line);
@@ -59,8 +88,7 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
 JNIEXPORT void JNI_OnUnload(JavaVM *vm, void *reserved) {
 }
 
-JNIEXPORT void Java_com_dropcam_android_media_H264Decoder_nativeInit(JNIEnv* env, jobject thiz, jint color_format)
-{
+JNIEXPORT void Java_com_dropcam_android_media_H264Decoder_nativeInit(JNIEnv* env, jobject thiz, jint color_format) {
   DecoderContext *ctx = calloc(1, sizeof(DecoderContext));
 
   D("Creating native H264 decoder context");
@@ -78,34 +106,33 @@ JNIEXPORT void Java_com_dropcam_android_media_H264Decoder_nativeInit(JNIEnv* env
   }
 
   ctx->codec = avcodec_find_decoder(CODEC_ID_H264);
-  ctx->codecCtx = avcodec_alloc_context3(ctx->codec);
+  ctx->codec_ctx = avcodec_alloc_context3(ctx->codec);
 
-  ctx->codecCtx->pix_fmt = PIX_FMT_YUV420P;
-  ctx->codecCtx->flags2 |= CODEC_FLAG2_CHUNKS;
+  ctx->codec_ctx->pix_fmt = PIX_FMT_YUV420P;
+  ctx->codec_ctx->flags2 |= CODEC_FLAG2_CHUNKS;
 
-  ctx->srcFrame = avcodec_alloc_frame();
-  ctx->dstFrame = avcodec_alloc_frame();
+  ctx->src_frame = avcodec_alloc_frame();
+  ctx->dst_frame = avcodec_alloc_frame();
 
-  avcodec_open2(ctx->codecCtx, ctx->codec, NULL);
+  avcodec_open2(ctx->codec_ctx, ctx->codec, NULL);
 
   set_ctx(env, thiz, ctx);
 }
 
-JNIEXPORT void Java_com_dropcam_android_media_H264Decoder_nativeDestroy(JNIEnv* env, jobject thiz)
-{
+JNIEXPORT void Java_com_dropcam_android_media_H264Decoder_nativeDestroy(JNIEnv* env, jobject thiz) {
   DecoderContext *ctx = get_ctx(env, thiz);
 
   D("Destroying native H264 decoder context");
-  avcodec_close(ctx->codecCtx);
-  av_free(ctx->codecCtx);
-  av_free(ctx->srcFrame);
-  av_free(ctx->dstFrame);
+
+  avcodec_close(ctx->codec_ctx);
+  av_free(ctx->codec_ctx);
+  av_free(ctx->src_frame);
+  av_free(ctx->dst_frame);
 
   free(ctx);
 }
 
-JNIEXPORT jint Java_com_dropcam_android_media_H264Decoder_consumeNalUnitsFromDirectBuffer(JNIEnv* env, jobject thiz, jobject nal_units, jint num_bytes)
-{
+JNIEXPORT jint Java_com_dropcam_android_media_H264Decoder_consumeNalUnitsFromDirectBuffer(JNIEnv* env, jobject thiz, jobject nal_units, jint num_bytes, jlong pkt_pts) {
   DecoderContext *ctx = get_ctx(env, thiz);
 
   void *buf = NULL;
@@ -122,48 +149,44 @@ JNIEXPORT jint Java_com_dropcam_android_media_H264Decoder_consumeNalUnitsFromDir
 
   AVPacket packet = {
       .data = (uint8_t*)buf,
-      .size = num_bytes
+      .size = num_bytes,
+      .pts = pkt_pts
   };
 
   int frameFinished = 0;
-  int res = avcodec_decode_video2(ctx->codecCtx, ctx->srcFrame, &frameFinished, &packet);
+  int res = avcodec_decode_video2(ctx->codec_ctx, ctx->src_frame, &frameFinished, &packet);
 
   if (frameFinished)
-    ctx->frameReady = 1;
+    ctx->frame_ready = 1;
 
   return res;
 }
 
-JNIEXPORT jboolean Java_com_dropcam_android_media_H264Decoder_isFrameReady(JNIEnv* env, jobject thiz)
-{
+JNIEXPORT jboolean Java_com_dropcam_android_media_H264Decoder_isFrameReady(JNIEnv* env, jobject thiz) {
   DecoderContext *ctx = get_ctx(env, thiz);
-  return ctx->frameReady ? JNI_TRUE : JNI_FALSE;
+  return ctx->frame_ready ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT jint Java_com_dropcam_android_media_H264Decoder_getWidth(JNIEnv* env, jobject thiz)
-{
+JNIEXPORT jint Java_com_dropcam_android_media_H264Decoder_getWidth(JNIEnv* env, jobject thiz) {
   DecoderContext *ctx = get_ctx(env, thiz);
-  return ctx->codecCtx->width;
+  return ctx->codec_ctx->width;
 }
 
-JNIEXPORT jint Java_com_dropcam_android_media_H264Decoder_getHeight(JNIEnv* env, jobject thiz)
-{
+JNIEXPORT jint Java_com_dropcam_android_media_H264Decoder_getHeight(JNIEnv* env, jobject thiz) {
   DecoderContext *ctx = get_ctx(env, thiz);
-  return ctx->codecCtx->height;
+  return ctx->codec_ctx->height;
 }
 
-JNIEXPORT jint Java_com_dropcam_android_media_H264Decoder_getOutputByteSize(JNIEnv* env, jobject thiz)
-{
+JNIEXPORT jint Java_com_dropcam_android_media_H264Decoder_getOutputByteSize(JNIEnv* env, jobject thiz) {
   DecoderContext *ctx = get_ctx(env, thiz);
-  return avpicture_get_size(ctx->color_format, ctx->codecCtx->width, ctx->codecCtx->height);
+  return avpicture_get_size(ctx->color_format, ctx->codec_ctx->width, ctx->codec_ctx->height);
 }
 
-JNIEXPORT jboolean Java_com_dropcam_android_media_H264Decoder_decodeFrameToDirectBuffer(JNIEnv* env, jobject thiz, jobject out_buffer)
-{
+JNIEXPORT jlong Java_com_dropcam_android_media_H264Decoder_decodeFrameToDirectBuffer(JNIEnv* env, jobject thiz, jobject out_buffer) {
   DecoderContext *ctx = get_ctx(env, thiz);
 
-  if (!ctx->frameReady)
-    return JNI_FALSE;
+  if (!ctx->frame_ready)
+    return -1;
 
   void *out_buf = (*env)->GetDirectBufferAddress(env, out_buffer);
   if (out_buf == NULL) {
@@ -173,31 +196,35 @@ JNIEXPORT jboolean Java_com_dropcam_android_media_H264Decoder_decodeFrameToDirec
 
   long out_buf_len = (*env)->GetDirectBufferCapacity(env, out_buffer);
 
-  int pic_buf_size = avpicture_get_size(ctx->color_format, ctx->codecCtx->width, ctx->codecCtx->height);
+  int pic_buf_size = avpicture_get_size(ctx->color_format, ctx->codec_ctx->width, ctx->codec_ctx->height);
 
   if (out_buf_len < pic_buf_size) {
     D("Input buffer too small");
-    return JNI_FALSE;
+    return -1;
   }
 
   if (ctx->color_format == COLOR_FORMAT_YUV420) {
-    memcpy(ctx->srcFrame->data, out_buffer, pic_buf_size);
+    memcpy(ctx->src_frame->data, out_buffer, pic_buf_size);
   }
   else {
-    if (ctx->convertCtx == NULL) {
-      ctx->convertCtx = sws_getContext(ctx->codecCtx->width, ctx->codecCtx->height, ctx->codecCtx->pix_fmt,
-          ctx->codecCtx->width, ctx->codecCtx->height, ctx->color_format, SWS_FAST_BILINEAR, NULL, NULL, NULL);
+    if (ctx->convert_ctx == NULL) {
+      ctx->convert_ctx = sws_getContext(ctx->codec_ctx->width, ctx->codec_ctx->height, ctx->codec_ctx->pix_fmt,
+          ctx->codec_ctx->width, ctx->codec_ctx->height, ctx->color_format, SWS_FAST_BILINEAR, NULL, NULL, NULL);
     }
 
-    avpicture_fill((AVPicture*)ctx->dstFrame, (uint8_t*)out_buf, ctx->color_format, ctx->codecCtx->width,
-        ctx->codecCtx->height);
+    avpicture_fill((AVPicture*)ctx->dst_frame, (uint8_t*)out_buf, ctx->color_format, ctx->codec_ctx->width,
+        ctx->codec_ctx->height);
 
-    sws_scale(ctx->convertCtx, (const uint8_t**)ctx->srcFrame->data, ctx->srcFrame->linesize, 0, ctx->codecCtx->height,
-        ctx->dstFrame->data, ctx->dstFrame->linesize);
+    sws_scale(ctx->convert_ctx, (const uint8_t**)ctx->src_frame->data, ctx->src_frame->linesize, 0, ctx->codec_ctx->height,
+        ctx->dst_frame->data, ctx->dst_frame->linesize);
   }
 
-  ctx->frameReady = 0;
+  ctx->frame_ready = 0;
 
-  return JNI_TRUE;
+  if (ctx->src_frame->pkt_pts == AV_NOPTS_VALUE) {
+    D("No PTS was passed from avcodec_decode!");
+  }
+
+  return ctx->src_frame->pkt_pts;
 }
 
